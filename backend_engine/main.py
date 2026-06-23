@@ -1,18 +1,13 @@
 """
-main.py — KonteksMedia Backend Engine entry point.
+main.py — DoksliPlis Backend Engine entry point.
 
 Provides a CLI and a thin wrapper around the search agent so the
 pipeline can be invoked directly or imported by a future FastAPI /
 Streamlit layer.
 
-Examples
---------
+Example of usage :
 CLI:
-    $ python main.py "saya tidak pernah korupsi"
-
-Programmatic:
-    >>> from main import run_pipeline
-    >>> result = run_pipeline("saya tidak pernah korupsi")
+    $ python main.py "PDIP akan mendukung Prabowo di 2029"
 """
 
 from __future__ import annotations
@@ -21,32 +16,27 @@ import json
 import logging
 import sys
 
-from dotenv import load_dotenv
-
 from src.transformers.search_agent import verify_claim
-
-load_dotenv()
 
 _LOG = logging.getLogger(__name__)
 
 
-def run_pipeline(claim: str, api_key: str | None = None) -> dict:
-    """Execute the full media-verification pipeline and return the result dict.
+def run_pipeline(claim: str) -> dict:
+    """Execute the full text-verification pipeline and return the result dict.
 
     Parameters
     ----------
     claim : str
-        Indonesian political quote or claim to verify.
-    api_key : str, optional
-        Overrides the ``YOUTUBE_API_KEY`` environment variable.
+        Indonesian political claim to verify.
 
     Returns
     -------
     dict — see ``verify_claim`` return spec in ``search_agent.py``.
     """
     _LOG.info("Pipeline started for claim: %.80s", claim)
-    result = verify_claim(claim, api_key=api_key)
-    _LOG.info("Pipeline finished.  Confidence=%s", result.get("match_confidence", "N/A"))
+    result = verify_claim(claim)
+    article_count = len(result.get("articles", []))
+    _LOG.info("Pipeline finished.  Articles fetched=%d", article_count)
     return result
 
 
@@ -58,7 +48,7 @@ def main() -> None:
     )
 
     if len(sys.argv) < 2:
-        print('Usage: python main.py "<Indonesian quote to verify>"')
+        print('Usage: python main.py "<Indonesian claim to verify>"')
         sys.exit(1)
 
     claim_text = " ".join(sys.argv[1:])

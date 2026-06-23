@@ -1,0 +1,14 @@
+# DoksliPlis — Backend Engine Dependencies
+# Python 3.10+
+
+# DuckDuckGo search (free, no API key required)
+ddgs
+
+# HTTP requests for web scraping
+requests==2.32.3
+
+# HTML parsing for article text extraction
+beautifulsoup4==4.12.3
+
+# Environment variable management
+python-dotenv==1.0.1
