@@ -12,3 +12,7 @@ beautifulsoup4==4.12.3
 
 # Environment variable management
 python-dotenv==1.0.1
+
+# API framework
+fastapi==0.115.6
+uvicorn==0.34.0
