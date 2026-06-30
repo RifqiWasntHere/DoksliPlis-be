@@ -59,9 +59,10 @@ DoksliPlis/
 | Site              | Why It's Here                    |
 |-------------------|----------------------------------|
 | `turnbackhoax.id` | Fact-checking, first by default  |
-| `kompas.com`      | Mainstream, widely cited          |
-| `tirto.id`        | Digital-native, deep reporting   |
+| `kompas.com`      | Mainstream, widely cited         |
 | `tempo.co`        | Investigative journalism         |
+
+(tirto.id is deprecated due to its messy, abomination-like site structure lmao)
 
 The search query uses `site:` operators to scope results to these domains only. No random blogs, no social media noise.
 

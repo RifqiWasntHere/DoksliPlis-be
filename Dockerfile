@@ -40,4 +40,4 @@ EXPOSE 8000
 #     CMD curl -f http://localhost:8000/health || exit 1
 
 # Default: run the FastAPI server
-CMD ["uvicorn", "backend_engine.api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "backend_engine.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--loop", "uvloop", "--http", "httptools"]
