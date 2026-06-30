@@ -4,10 +4,8 @@
 # DuckDuckGo search (free, no API key required)
 ddgs
 
-# HTTP requests for web scraping
-# requests replaced by httpx for HTTP/2 bot bypass
-httpx[brotli]==0.28.1
-brotli==1.1.0
+# HTTP requests for scrape.do API calls
+requests==2.32.3
 
 # HTML parsing for article text extraction
 beautifulsoup4==4.12.3
@@ -18,3 +16,5 @@ python-dotenv==1.0.1
 # API framework
 fastapi==0.115.6
 uvicorn==0.34.0
+uvloop
+httptools

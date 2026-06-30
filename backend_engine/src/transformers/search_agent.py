@@ -8,7 +8,7 @@ Indonesian political claim), the agent:
    claim, scoped to trusted Indonesian publishers via ``site:`` operators
    and locked to the Indonesia region (``region="id-id"``).
 2. Takes the top 3 URL results (extracted from the ``href`` field).
-3. Scrapes the main article text from each URL using ``httpx`` + ``beautifulsoup4``.
+3. Scrapes the main article text from each URL using the ``scrape.do`` proxy API.
 4. Returns a structured JSON payload containing the claim, the 3 URLs, and
    the extracted article text — ready for LLM evaluation.
 
@@ -23,24 +23,64 @@ Usage
 from __future__ import annotations
 
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-import httpx
 from bs4 import BeautifulSoup, Tag
+
+import requests
 from ddgs import DDGS  # type: ignore
 
 _LOG = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# .env loader (simple KEY=VALUE parser — no python-dotenv needed)
+# ---------------------------------------------------------------------------
+_env_file = Path(__file__).resolve().parent.parent.parent / ".env"
+_raw_env: dict[str, str] = {}
+
+
+def _load_env() -> dict[str, str]:
+    """Parse a simple KEY=VALUE .env file."""
+    env: dict[str, str] = {}
+    if not _env_file.exists():
+        return env
+    for _line in _env_file.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if not _line or _line.startswith("#"):
+            continue
+        if "=" not in _line:
+            continue
+        _k, _, _v = _line.partition("=")
+        env[_k.strip()] = _v.strip()
+    return env
+
+
+_raw_env = _load_env()
+
+
+def _getenv(key: str, default: str = "") -> str:
+    """Read an env var from the loaded .env dict, falling back to real env."""
+    return _raw_env.get(key, "") or os.environ.get(key, default)
+
+
+# ---------------------------------------------------------------------------
+# Scrape.do API configuration
+# ---------------------------------------------------------------------------
+_SCRAPE_DO_TOKEN = _getenv("SCRAPE_DO_TOKEN")
+_SCRAPE_DO_BASE_URL = "http://api.scrape.do/"
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 # Trusted Indonesian publishers — used as ``site:`` filter in the query.
 _TRUSTED_SITES = [
-    "turnbackhoax.id",
-    "kompas.com",
-    "tirto.id",
-    "tempo.co",
+    "turnbackhoax.id", #unproven
+    "kompas.com", #oke
+    "tempo.co", #oke
 ]
 
 # Number of search results to fetch and scrape.
@@ -93,23 +133,7 @@ _CONTENT_SELECTORS = [
     "p",                    # Fallback: all paragraphs
 ]
 
-# ---------------------------------------------------------------------------
-# HTTP client (reusable, with HTTP/2 support to bypass bot detection)
-# ---------------------------------------------------------------------------
-_client: httpx.Client | None = None
 
-
-def _get_client() -> httpx.Client:
-    """Return a shared httpx.Client with HTTP/2 and browser-like settings."""
-    global _client
-    if _client is None or _client.is_closed:
-        _client = httpx.Client(
-            http2=True,
-            timeout=_REQUEST_TIMEOUT,
-            headers=_HEADERS,
-            follow_redirects=True,
-        )
-    return _client
 
 
 # ---------------------------------------------------------------------------
@@ -173,39 +197,54 @@ def _search_claim(claim: str) -> list[dict[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — Article text extraction
+# Step 2 — Article text extraction (via scrape.do)
 # ---------------------------------------------------------------------------
-def _fetch_page(url: str) -> str | None:
-    """Fetch a page with retry logic, using httpx with HTTP/2.
+def _fetch_page_via_scrape_do(url: str) -> str | None:
+    """Fetch article HTML through the scrape.do proxy service.
 
-    Returns the HTML text on success, or None on failure after all retries.
+    scrape.do runs the request from residential IPs, bypassing the
+    datacenter-IP blocks that Indonesian news sites (kompas, tempo, etc.)
+    normally enforce.
+
+    Returns the raw HTML on success, or None on failure after all retries.
     """
-    client = _get_client()
+    if not _SCRAPE_DO_TOKEN:
+        _LOG.error(
+            "SCRAPE_DO_TOKEN is not set — cannot scrape. "
+            "Add SCRAPE_DO_TOKEN=<your_token> to backend_engine/.env"
+        )
+        return None
+
+    encoded_url = quote(url, safe="")
+    api_url = f"{_SCRAPE_DO_BASE_URL}?token={_SCRAPE_DO_TOKEN}&url={encoded_url}"
 
     for attempt in range(_MAX_RETRIES):
         try:
-            resp = client.get(url)
+            resp = requests.get(
+                api_url,
+                timeout=_REQUEST_TIMEOUT,
+                headers={"User-Agent": _HEADERS["User-Agent"]},
+            )
             resp.raise_for_status()
 
-            # Check for suspiciously small / blocked responses
-            if len(resp.text) < 1000:
+            html = resp.text
+            if len(html) < 1000:
                 _LOG.warning(
-                    "Response from %s is too small (%d chars) on attempt %d — likely blocked or CAPTCHA",
+                    "scrape.do returned tiny response (%d chars) for %s on attempt %d",
+                    len(html),
                     url,
-                    len(resp.text),
                     attempt + 1,
                 )
                 if attempt < _MAX_RETRIES - 1:
-                    _RETRY_DELAY * (attempt + 1)
                     time.sleep(_RETRY_DELAY * (attempt + 1))
                     continue
                 return None
 
-            return resp.text
+            return html
 
-        except (httpx.HTTPError, httpx.TimeoutException) as exc:
+        except requests.RequestException as exc:
             _LOG.warning(
-                "Attempt %d/%d failed for %s: %s",
+                "scrape.do attempt %d/%d failed for %s: %s",
                 attempt + 1,
                 _MAX_RETRIES,
                 url,
@@ -222,8 +261,8 @@ def _extract_article_text(url: str) -> str:
 
     Scraping logic
     --------------
-    1. **Fetch** the page with ``httpx`` (HTTP/2, browser-like headers)
-       so news sites on datacenter IPs don't block the request.
+    1. **Fetch** the page through ``scrape.do`` (residential proxy that
+       bypasses datacenter-IP blocks used by Indonesian news sites).
     2. **Retry** up to 3 times with backoff on failure or small responses.
     3. **Parse** the HTML with ``BeautifulSoup`` (``html.parser`` backend).
     4. **Strip** non-content elements commonly containing noise.
@@ -241,7 +280,7 @@ def _extract_article_text(url: str) -> str:
     str — the extracted article body text, or an empty string if
     extraction fails.
     """
-    html = _fetch_page(url)
+    html = _fetch_page_via_scrape_do(url)
     if html is None:
         return ""
 
@@ -314,7 +353,6 @@ def verify_claim(claim: str) -> dict[str, Any]:
             "sources": [                # trusted publisher filter used
                 "turnbackhoax.id",
                 "kompas.com",
-                "tirto.id",
                 "tempo.co",
             ],
             "articles": [

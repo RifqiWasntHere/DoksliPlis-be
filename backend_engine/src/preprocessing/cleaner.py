@@ -51,10 +51,15 @@ def _strip_noise(text: str) -> str:
 
 def _normalize_whitespace(text: str) -> str:
     """Collapse excessive whitespace while preserving paragraph breaks."""
+    # Replace single newlines (not part of a paragraph break) with a space
+    # This handles <br> tags and inline element boundaries from HTML parsing
+    text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
     # Replace 3+ newlines with exactly 2 (paragraph separator)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    # Replace multiple spaces/tabs with single space
+    # Replace multiple spaces/tabs with single space (not across newlines)
     text = re.sub(r"[^\S\n]+", " ", text)
+    # Clean up any trailing spaces before newlines
+    text = re.sub(r" +\n", "\n", text)
     return text.strip()
 
 
