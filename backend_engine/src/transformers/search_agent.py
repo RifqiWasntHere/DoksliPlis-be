@@ -8,7 +8,7 @@ Indonesian political claim), the agent:
    claim, scoped to trusted Indonesian publishers via ``site:`` operators
    and locked to the Indonesia region (``region="id-id"``).
 2. Takes the top 3 URL results (extracted from the ``href`` field).
-3. Scrapes the main article text from each URL using ``requests`` + ``beautifulsoup4``.
+3. Scrapes the main article text from each URL using ``httpx`` + ``beautifulsoup4``.
 4. Returns a structured JSON payload containing the claim, the 3 URLs, and
    the extracted article text — ready for LLM evaluation.
 
@@ -23,9 +23,10 @@ Usage
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
-import requests
+import httpx
 from bs4 import BeautifulSoup, Tag
 from ddgs import DDGS  # type: ignore
 
@@ -43,23 +44,41 @@ _TRUSTED_SITES = [
 ]
 
 # Number of search results to fetch and scrape.
-_MAX_RESULTS = 3
+_MAX_RESULTS = 1
 
 # DuckDuckGo region code for Indonesia.
 _SEARCH_REGION = "id-id"
 
 # HTTP request timeout in seconds.
-_REQUEST_TIMEOUT = 10
+_REQUEST_TIMEOUT = 15
 
-# User-Agent header to avoid being blocked by news sites.
+# Retry configuration.
+_MAX_RETRIES = 3
+_RETRY_DELAY = 2  # seconds between retries
+
+# Browser-like headers to avoid bot detection on news sites / datacenter IPs.
 _HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
+        "Chrome/126.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "id,en-US;q=0.9,en;q=0.8",
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-Ch-Ua": '"Not/A)Brand";v="99", "Google Chrome";v="126", "Chromium";v="126"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 # CSS selectors tried in order to extract article body text.
@@ -73,6 +92,24 @@ _CONTENT_SELECTORS = [
     ".story p",             # Tempo-style
     "p",                    # Fallback: all paragraphs
 ]
+
+# ---------------------------------------------------------------------------
+# HTTP client (reusable, with HTTP/2 support to bypass bot detection)
+# ---------------------------------------------------------------------------
+_client: httpx.Client | None = None
+
+
+def _get_client() -> httpx.Client:
+    """Return a shared httpx.Client with HTTP/2 and browser-like settings."""
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.Client(
+            http2=True,
+            timeout=_REQUEST_TIMEOUT,
+            headers=_HEADERS,
+            follow_redirects=True,
+        )
+    return _client
 
 
 # ---------------------------------------------------------------------------
@@ -138,26 +175,60 @@ def _search_claim(claim: str) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 # Step 2 — Article text extraction
 # ---------------------------------------------------------------------------
+def _fetch_page(url: str) -> str | None:
+    """Fetch a page with retry logic, using httpx with HTTP/2.
+
+    Returns the HTML text on success, or None on failure after all retries.
+    """
+    client = _get_client()
+
+    for attempt in range(_MAX_RETRIES):
+        try:
+            resp = client.get(url)
+            resp.raise_for_status()
+
+            # Check for suspiciously small / blocked responses
+            if len(resp.text) < 1000:
+                _LOG.warning(
+                    "Response from %s is too small (%d chars) on attempt %d — likely blocked or CAPTCHA",
+                    url,
+                    len(resp.text),
+                    attempt + 1,
+                )
+                if attempt < _MAX_RETRIES - 1:
+                    _RETRY_DELAY * (attempt + 1)
+                    time.sleep(_RETRY_DELAY * (attempt + 1))
+                    continue
+                return None
+
+            return resp.text
+
+        except (httpx.HTTPError, httpx.TimeoutException) as exc:
+            _LOG.warning(
+                "Attempt %d/%d failed for %s: %s",
+                attempt + 1,
+                _MAX_RETRIES,
+                url,
+                exc,
+            )
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(_RETRY_DELAY * (attempt + 1))
+
+    return None
+
+
 def _extract_article_text(url: str) -> str:
     """Scrape the main article text from a news URL.
 
     Scraping logic
     --------------
-    1. **Fetch** the page with ``requests.get`` using a realistic User-Agent
-       so news sites don't return 403 / bot walls.
-    2. **Parse** the HTML with ``BeautifulSoup`` (``html.parser`` backend —
-       no extra native deps needed).
-    3. **Strip** non-content elements that commonly contain noise:
-       ``<script>``, ``<style>``, ``<nav>``, ``<header>``, ``<footer>``,
-       ``<aside>``, and any element whose class/id contains ``nav``,
-       ``menu``, ``sidebar``, ``footer``, ``header``, ``ad``, ``banner``,
-       ``social``, ``share``, ``related``, ``recommend``, ``comment``,
-       ``cookie``, ``popup``, ``modal``, ``newsletter``, ``subscribe``.
-    4. **Select** paragraphs using a prioritized list of CSS selectors
-       (``_CONTENT_SELECTORS``).  We try the most specific pattern first
-       (``article p``) and fall back to broader ones (``main p``, then
-       ``p``).  The first selector that yields text wins.
-    5. **Clean** the extracted text: drop short fragments (< 30 chars),
+    1. **Fetch** the page with ``httpx`` (HTTP/2, browser-like headers)
+       so news sites on datacenter IPs don't block the request.
+    2. **Retry** up to 3 times with backoff on failure or small responses.
+    3. **Parse** the HTML with ``BeautifulSoup`` (``html.parser`` backend).
+    4. **Strip** non-content elements commonly containing noise.
+    5. **Select** paragraphs using a prioritized list of CSS selectors.
+    6. **Clean** the extracted text: drop short fragments (< 30 chars),
        deduplicate while preserving order, and join with double newlines.
 
     Parameters
@@ -170,14 +241,11 @@ def _extract_article_text(url: str) -> str:
     str — the extracted article body text, or an empty string if
     extraction fails.
     """
-    try:
-        resp = requests.get(url, headers=_HEADERS, timeout=_REQUEST_TIMEOUT)
-        resp.raise_for_status()
-    except requests.RequestException as exc:
-        _LOG.warning("Failed to fetch %s: %s", url, exc)
+    html = _fetch_page(url)
+    if html is None:
         return ""
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(html, "html.parser")
 
     # --- Remove noise elements -------------------------------------------
     noise_keywords = [

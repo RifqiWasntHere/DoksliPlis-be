@@ -5,7 +5,9 @@
 ddgs
 
 # HTTP requests for web scraping
-requests==2.32.3
+# requests replaced by httpx for HTTP/2 bot bypass
+httpx[brotli]==0.28.1
+brotli==1.1.0
 
 # HTML parsing for article text extraction
 beautifulsoup4==4.12.3
